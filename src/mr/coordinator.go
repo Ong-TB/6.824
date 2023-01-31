@@ -1,7 +1,6 @@
 package mr
 
 import (
-	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -16,8 +15,7 @@ import (
 const (
 	MAP    = 0
 	REDUCE = 1
-	WAIT   = 3
-	EXIT   = 4
+	EXIT   = 2
 )
 
 // Task status
@@ -29,7 +27,18 @@ const (
 
 type Coordinator struct {
 	// Your definitions here.
+	cPid                   string
+	nReduce                int
+	nMap                   int
+	taskNum                int
+	mapIdx                 int
+	reduceIdx              int
+	idLock, miLock, riLock sync.Mutex
+	mapDone                sync.WaitGroup
+	reduceDone             sync.WaitGroup
 
+	todoQueue  chan *Task
+	runningSet sync.Map
 }
 
 type Task struct {
@@ -38,7 +47,7 @@ type Task struct {
 	Filename      string // Map task needs it to read input
 	NMap, NReduce int    // to write or read inter-kv
 	TaskType      int    // map/reduce/exit
-	stat          int    // not alloc, allocated, done
+	stat          int    // todo, running, done
 	tlock         sync.Mutex
 }
 
@@ -57,27 +66,22 @@ func (t *Task) GetStat() int {
 
 // Your code here -- RPC handlers for the worker to call.
 
-var (
-	nReduce                int
-	nMap                   int
-	mapIdx                 int
-	reduceIdx              int
-	cPid                   string
-	taskNum                int
-	idLock, miLock, riLock sync.Mutex
-	// runLock                sync.Mutex
-	// finLock                sync.Mutex
-	mapDone    sync.WaitGroup
-	reduceDone sync.WaitGroup
-)
+// var (
+// 	cPid                   string
+// 	nReduce                int
+// 	nMap                   int
+// 	taskNum                int
+// 	mapIdx                 int
+// 	reduceIdx              int
+// 	idLock, miLock, riLock sync.Mutex
+// 	mapDone                sync.WaitGroup
+// var	reduceDone             sync.WaitGroup
+// )
 
-var (
-	todoQueue chan *Task
-	// runningQueue chan *Task
-	// doneQueue    chan *Task
-	runningSet sync.Map
-	exiting    chan int
-)
+// var (
+// 	todoQueue  chan *Task
+// 	runningSet sync.Map
+// )
 
 // an example RPC handler.
 //
@@ -88,107 +92,59 @@ func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
 }
 
 func (c *Coordinator) AskTask(args *MRArgs, reply *MRReply) error {
-	// log.Println("Master", cPid, "received", *args)
-	// if rFinished {
-	// 	todoQueue <- c.newTask("", EXIT)
-	// }
-	// reply.Task = <-todoQueue
-	// finLock.Lock()
-	// if rFinished {
-	// 	reply.Task = c.newTask("", EXIT)
-	// } else {
-	// 	reply.Task = <-todoQueue
-	// }
-	// finLock.Unlock()
-	t := <-todoQueue
-	// runningQueue <- t
+	t := <-c.todoQueue
 	t.SetStat(RUNNING)
-	runningSet.Store(t.Id, t)
-	go monitor(t)
+	c.runningSet.Store(t.Id, t)
+
+	go c.monitor(t)
 
 	reply.Task = t
-	// reply.Task.Stat = RUNNING
-	// log.Println("Master sent task", *reply.Task)
-	reply.Message = "Master" + cPid + "sent a task."
+	reply.Message = "Master" + c.cPid + "sent a task."
 
 	return nil
 }
 
 func (c *Coordinator) TaskDone(args *MRArgs, reply *MRReply) error {
-	// log.Println("Master", cPid, "received", *args.Task)
 	task := args.Task
-	// runLock.Lock()
-	// t := <-runningQueue
-	// for t.Id != task.Id {
-	// 	runningQueue <- t
-	// 	t = <-runningQueue
-	// }
-	iface, ok := runningSet.Load(task.Id)
+	iface, ok := c.runningSet.Load(task.Id)
 	if !ok {
-		// runLock.Unlock()
+		// if task is not in running set,
+		// it's an invalid completion
 		return nil
 	}
+
 	t := iface.(*Task)
-	runningSet.Delete(t.Id)
-
 	t.SetStat(DONE)
+	c.runningSet.Delete(t.Id)
 
-	// runLock.Unlock()
-	// doneQueue <- t
 	switch t.TaskType {
 	case MAP:
-		// mdLock.Lock()
-		// nMapDone++
-		// if nMapDone == nMap {
-		// 	nMapDone = 0
-		// 	go c.generateReduceTasks()
-		// }
-		// mdLock.Unlock()
-		mapDone.Done()
+		c.mapDone.Done()
 	case REDUCE:
-		// rdLock.Lock()
-		// nReduceDone++
-		// finLock.Lock()
-		// if !rFinished && nReduceDone == nReduce {
-		// 	todoQueue <- c.newTask("", EXIT)
-		// 	rFinished = true
-		// }
-		// finLock.Unlock()
-		// rdLock.Unlock()
-		reduceDone.Done()
+		c.reduceDone.Done()
 	}
-	// log.Println(*args.Task, "done")
 	return nil
 }
 
 func (c *Coordinator) generateMapTasks(filenames []string) {
 	for _, filename := range filenames {
 		task := c.newTask(filename, MAP)
-		todoQueue <- task
+		c.todoQueue <- task
 	}
 }
 func (c *Coordinator) generateReduceTasks() {
-	mapDone.Wait()
-	for i := 0; i < nReduce; i++ {
+	c.mapDone.Wait()
+	for i := 0; i < c.nReduce; i++ {
 		task := c.newTask("", REDUCE)
-		// log.Println("a")
-		todoQueue <- task
-		// log.Println("b")
+		c.todoQueue <- task
 	}
 }
 
 func (c *Coordinator) generateExitTasks() {
-	reduceDone.Wait()
+	c.reduceDone.Wait()
 	for {
-		go func() {
-			exiting <- 1
-		}()
-		_, ok := <-exiting
-		if !ok {
-			return
-		}
 		task := c.newTask("", EXIT)
-		todoQueue <- task
+		c.todoQueue <- task
 	}
 }
 
@@ -196,50 +152,41 @@ func (c *Coordinator) newTask(filename string, taskType int) *Task {
 	task := &Task{
 		Filename: filename,
 		TaskType: taskType,
-		NReduce:  nReduce,
-		NMap:     nMap,
+		NReduce:  c.nReduce,
+		NMap:     c.nMap,
 		stat:     TODO,
-		tlock:    sync.Mutex{},
 	}
 
-	idLock.Lock()
-	task.Id = taskNum
-	taskNum++
-	idLock.Unlock()
+	c.idLock.Lock()
+	task.Id = c.taskNum
+	c.taskNum++
+	c.idLock.Unlock()
 
 	switch taskType {
 	case MAP:
-		miLock.Lock()
-		task.TaskIdx = mapIdx
-		mapIdx++
-		miLock.Unlock()
+		c.miLock.Lock()
+		task.TaskIdx = c.mapIdx
+		c.mapIdx++
+		c.miLock.Unlock()
 	case REDUCE:
-		riLock.Lock()
-		task.TaskIdx = reduceIdx
-		reduceIdx++
-		riLock.Unlock()
+		c.riLock.Lock()
+		task.TaskIdx = c.reduceIdx
+		c.reduceIdx++
+		c.riLock.Unlock()
 	default:
 		task.TaskIdx = 0
 	}
 	return task
 }
 
-func monitor(t *Task) {
+func (c *Coordinator) monitor(t *Task) {
 	time.Sleep(10 * time.Second)
-	// runLock.Lock()
-	// t.Tlock.Lock()
-	// _, ok := runningSet.Load(t.Id)
-	if t.GetStat() == RUNNING {
-		// if ok {
-		// log.Println(*t, "has run for 10s")
-		runningSet.Delete(t.Id)
-		// t.Stat = TODO
-		t.SetStat(TODO)
-		todoQueue <- t
-	}
-	// runLock.Unlock()
-	// t.Tlock.Unlock()
 
+	if t.GetStat() == RUNNING {
+		c.runningSet.Delete(t.Id)
+		t.SetStat(TODO)
+		c.todoQueue <- t
+	}
 }
 
 // start a thread that listens for RPCs from worker.go
@@ -253,63 +200,49 @@ func (c *Coordinator) server() {
 	if e != nil {
 		log.Fatal("listen error:", e)
 	}
-	// log.Println("Enter server")
 	go http.Serve(l, nil)
 }
 
 // main/mrcoordinator.go calls Done() periodically to find out
 // if the entire job has finished.
 func (c *Coordinator) Done() bool {
-	reduceDone.Wait()
+	c.reduceDone.Wait()
 
 	time.Sleep(time.Second)
 
-	lenTodo := len(todoQueue)
+	lenTodo := len(c.todoQueue)
 	if lenTodo == 0 {
 		return false
 	}
+
 	lenRun := 0
-	runningSet.Range(func(k, v interface{}) bool {
+	c.runningSet.Range(func(k, v interface{}) bool {
 		lenRun++
 		return true
 	})
 	return lenRun == 0
-
-	// done := len(todoQueue) != 0 && len(runningSet) == 0
-	// return done
-	// Your code here.
-	// finLock.Lock()
-	// defer finLock.Unlock()
-	// return rFinished && len(todoQueue) == 0 && len(runningQueue) == 0
-}
-
-func (c *Coordinator) LogQueue(ch chan *Task) {
-	for task := range ch {
-		fmt.Println(*task)
-	}
 }
 
 // create a Coordinator.
 // main/mrcoordinator.go calls this function.
 // nReduce is the number of reduce tasks to use.
 func MakeCoordinator(files []string, _nReduce int) *Coordinator {
-	c := Coordinator{}
+	c := Coordinator{
+		cPid:      strconv.Itoa(os.Getpid()),
+		nReduce:   _nReduce,
+		nMap:      len(files),
+		todoQueue: make(chan *Task, len(files)),
+	}
 
 	// Your code here.
-	cPid = strconv.Itoa(os.Getpid())
-	nReduce, nMap = _nReduce, len(files)
-	todoQueue = make(chan *Task, nMap)
-	// runningQueue = make(chan *Task, nMap)
-	// doneQueue = make(chan *Task, nMap)
 
-	exiting = make(chan int)
-	mapDone.Add(nMap)
-	reduceDone.Add(nReduce)
+	c.mapDone.Add(c.nMap)
+	c.reduceDone.Add(c.nReduce)
 
 	go c.generateMapTasks(files)
 	go c.generateReduceTasks()
 	go c.generateExitTasks()
-	// go c.LogQueue(todoQueue)
+
 	c.server()
 
 	return &c
