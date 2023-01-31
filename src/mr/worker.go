@@ -46,16 +46,12 @@ func Worker(_mapf func(string, string) []KeyValue,
 func process(task *Task) {
 	switch task.TaskType {
 	case EXIT:
-		// log.Println("I will exit.")
-		task.Stat = DONE
 		CallTaskDone(task)
 		os.Exit(0)
 	case MAP:
 		processMap(task)
-		task.Stat = DONE
 	case REDUCE:
 		processReduce(task)
-		task.Stat = DONE
 	default:
 		log.Fatalln("Failed to process task!", *task)
 	}
@@ -80,22 +76,23 @@ func processMap(task *Task) {
 
 	// write to mr-taskIdx-i{nReduce}
 	nReduce := task.NReduce
-	idx := strconv.Itoa(task.TaskIdx)
 	ofiles := make([]*os.File, nReduce)
 	for i := 0; i < nReduce; i++ {
-		oname := "mr-" + idx + "-" + strconv.Itoa(i)
-		ofiles[i], _ = os.Create(oname)
+		// oname := "mr-" + idx + "-" + strconv.Itoa(i)
+		// ofiles[i], _ = os.Create(oname)
+		ofiles[i], _ = ioutil.TempFile("", wPid)
 	}
 
 	for _, kv := range intermediate {
 		rIdx := ihash(kv.Key) % nReduce
 		ofile := ofiles[rIdx]
-		// this is the correct format for each line of Reduce output.
-		// for k := i; k < j; k++ {
-		// 	fmt.Printf("%v %v %d\n", key, val, rIdx)
-		// 	fmt.Fprintf(ofile, "%v %v\n", key, val)
-		// }
 		writeIntermediate(ofile, kv)
+	}
+
+	idx := strconv.Itoa(task.TaskIdx)
+	for i := 0; i < nReduce; i++ {
+		oname := "mr-" + idx + "-" + strconv.Itoa(i)
+		os.Rename(ofiles[i].Name(), oname)
 	}
 
 	for _, ofile := range ofiles {
@@ -115,8 +112,8 @@ func processReduce(task *Task) {
 		ifile.Close()
 	}
 	sort.Sort(ByKey(kva))
-	oname := "mr-out-" + idx
-	ofile, _ := os.Create(oname)
+
+	ofile, _ := ioutil.TempFile("", wPid)
 	i := 0
 	for i < len(kva) {
 		j := i + 1
@@ -132,6 +129,10 @@ func processReduce(task *Task) {
 		fmt.Fprintf(ofile, "%v %v\n", kva[i].Key, output)
 		i = j
 	}
+
+	oname := "mr-out-" + idx
+	os.Rename(ofile.Name(), oname)
+
 	ofile.Close()
 	// log.Println(kva)
 	// log.Println("Reduce completed")

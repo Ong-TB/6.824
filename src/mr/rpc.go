@@ -15,13 +15,15 @@ import (
 // and reply for an RPC.
 type MRArgs struct {
 	Message string
-	Task	*Task
+	Task    *Task
 }
 
 type MRReply struct {
 	Message string
-	Task	*Task
+	Task    *Task
 }
+
+//fff
 
 type ExampleArgs struct {
 	X int

@@ -38,8 +38,21 @@ type Task struct {
 	Filename      string // Map task needs it to read input
 	NMap, NReduce int    // to write or read inter-kv
 	TaskType      int    // map/reduce/exit
-	Stat          int    // not alloc, allocated, done
-	CreateTime    time.Time
+	stat          int    // not alloc, allocated, done
+	tlock         sync.Mutex
+}
+
+func (t *Task) SetStat(stat int) {
+	t.tlock.Lock()
+	t.stat = stat
+	t.tlock.Unlock()
+}
+
+func (t *Task) GetStat() int {
+	t.tlock.Lock()
+	stat := t.stat
+	t.tlock.Unlock()
+	return stat
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -52,18 +65,18 @@ var (
 	cPid                   string
 	taskNum                int
 	idLock, miLock, riLock sync.Mutex
-	runLock                sync.Mutex
-	finLock                sync.Mutex
-	mapDone                sync.WaitGroup
-	reduceDone             sync.WaitGroup
+	// runLock                sync.Mutex
+	// finLock                sync.Mutex
+	mapDone    sync.WaitGroup
+	reduceDone sync.WaitGroup
 )
 
 var (
-	todoQueue    chan *Task
-	runningQueue chan *Task
-	doneQueue    chan *Task
-	runningSet   sync.Map
-	exiting      chan int
+	todoQueue chan *Task
+	// runningQueue chan *Task
+	// doneQueue    chan *Task
+	runningSet sync.Map
+	exiting    chan int
 )
 
 // an example RPC handler.
@@ -89,11 +102,12 @@ func (c *Coordinator) AskTask(args *MRArgs, reply *MRReply) error {
 	// finLock.Unlock()
 	t := <-todoQueue
 	// runningQueue <- t
+	t.SetStat(RUNNING)
 	runningSet.Store(t.Id, t)
 	go monitor(t)
 
 	reply.Task = t
-	reply.Task.Stat = RUNNING
+	// reply.Task.Stat = RUNNING
 	// log.Println("Master sent task", *reply.Task)
 	reply.Message = "Master" + cPid + "sent a task."
 
@@ -103,7 +117,7 @@ func (c *Coordinator) AskTask(args *MRArgs, reply *MRReply) error {
 func (c *Coordinator) TaskDone(args *MRArgs, reply *MRReply) error {
 	// log.Println("Master", cPid, "received", *args.Task)
 	task := args.Task
-	runLock.Lock()
+	// runLock.Lock()
 	// t := <-runningQueue
 	// for t.Id != task.Id {
 	// 	runningQueue <- t
@@ -111,13 +125,15 @@ func (c *Coordinator) TaskDone(args *MRArgs, reply *MRReply) error {
 	// }
 	iface, ok := runningSet.Load(task.Id)
 	if !ok {
-		runLock.Unlock()
+		// runLock.Unlock()
 		return nil
 	}
 	t := iface.(*Task)
-	t.Stat = DONE
 	runningSet.Delete(t.Id)
-	runLock.Unlock()
+
+	t.SetStat(DONE)
+
+	// runLock.Unlock()
 	// doneQueue <- t
 	switch t.TaskType {
 	case MAP:
@@ -182,7 +198,8 @@ func (c *Coordinator) newTask(filename string, taskType int) *Task {
 		TaskType: taskType,
 		NReduce:  nReduce,
 		NMap:     nMap,
-		Stat:     TODO,
+		stat:     TODO,
+		tlock:    sync.Mutex{},
 	}
 
 	idLock.Lock()
@@ -209,14 +226,19 @@ func (c *Coordinator) newTask(filename string, taskType int) *Task {
 
 func monitor(t *Task) {
 	time.Sleep(10 * time.Second)
-	runLock.Lock()
-	if t.Stat == RUNNING {
-		log.Println(*t, "has run for 10s")
+	// runLock.Lock()
+	// t.Tlock.Lock()
+	// _, ok := runningSet.Load(t.Id)
+	if t.GetStat() == RUNNING {
+		// if ok {
+		// log.Println(*t, "has run for 10s")
 		runningSet.Delete(t.Id)
-		t.Stat = TODO
+		// t.Stat = TODO
+		t.SetStat(TODO)
 		todoQueue <- t
 	}
-	runLock.Unlock()
+	// runLock.Unlock()
+	// t.Tlock.Unlock()
 
 }
 
@@ -277,8 +299,8 @@ func MakeCoordinator(files []string, _nReduce int) *Coordinator {
 	cPid = strconv.Itoa(os.Getpid())
 	nReduce, nMap = _nReduce, len(files)
 	todoQueue = make(chan *Task, nMap)
-	runningQueue = make(chan *Task, nMap)
-	doneQueue = make(chan *Task, nMap)
+	// runningQueue = make(chan *Task, nMap)
+	// doneQueue = make(chan *Task, nMap)
 
 	exiting = make(chan int)
 	mapDone.Add(nMap)
