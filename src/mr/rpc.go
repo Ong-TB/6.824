@@ -15,6 +15,7 @@ import (
 // and reply for an RPC.
 type MRArgs struct {
 	Message string
+	Task	*Task
 }
 
 type MRReply struct {
