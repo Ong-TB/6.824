@@ -30,10 +30,6 @@ func Worker(_mapf func(string, string) []KeyValue,
 	mapf = _mapf
 	reducef = _reducef
 	wPid = strconv.Itoa(os.Getpid())
-	// uncomment to send the Example RPC to the coordinator.
-	// CallExample()
-
-	// callMaster()
 
 	for {
 		task := CallAskTask().Task
@@ -53,7 +49,7 @@ func process(task *Task) {
 	case REDUCE:
 		processReduce(task)
 	default:
-		log.Fatalln("Failed to process task!", *task)
+		log.Fatalln("Failed to process task!")
 	}
 }
 
@@ -72,14 +68,11 @@ func processMap(task *Task) {
 	file.Close()
 	kva := mapf(filename, string(content))
 	intermediate = append(intermediate, kva...)
-	// log.Println(intermediate)
 
 	// write to mr-taskIdx-i{nReduce}
 	nReduce := task.NReduce
 	ofiles := make([]*os.File, nReduce)
 	for i := 0; i < nReduce; i++ {
-		// oname := "mr-" + idx + "-" + strconv.Itoa(i)
-		// ofiles[i], _ = os.Create(oname)
 		ofiles[i], _ = ioutil.TempFile("", wPid)
 	}
 
@@ -101,7 +94,6 @@ func processMap(task *Task) {
 }
 
 func processReduce(task *Task) {
-	// time.Sleep(time.Second)
 	kva := []KeyValue{}
 	nMap := task.NMap
 	idx := strconv.Itoa(task.TaskIdx)
@@ -134,22 +126,16 @@ func processReduce(task *Task) {
 	os.Rename(ofile.Name(), oname)
 
 	ofile.Close()
-	// log.Println(kva)
-	// log.Println("Reduce completed")
 }
 
 // summary: workers use <call("master_func_name",args,reply)>
 // where args and reply are interface{}, i.e. any type
 
 func CallAskTask() MRReply {
-	// log.Println("I'm worker", wPid, "I'm asking master for a task.")
 	args := MRArgs{Message: "Worker" + wPid + "asking for task"}
 	reply := MRReply{}
-	// log.Println("about to call")
 	ok := call("Coordinator.AskTask", &args, &reply)
-	if ok {
-		// log.Println("Worker received task", *reply.Task)
-	} else {
+	if !ok {
 		log.Fatalln("Call failed!")
 	}
 	return reply
@@ -160,9 +146,7 @@ func CallTaskDone(task *Task) {
 	reply := MRReply{}
 
 	ok := call("Coordinator.TaskDone", &args, &reply)
-	if ok {
-		// log.Println("Worker dealt with task", *args.Task)
-	} else {
+	if !ok {
 		log.Fatalln("Call failed!")
 	}
 }
@@ -201,7 +185,6 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 	// c, err := rpc.DialHTTP("tcp", "127.0.0.1"+":1234")
 	sockname := coordinatorSock()
 
-	// log.Println("From worker, sockname is -" + sockname)
 	c, err := rpc.DialHTTP("unix", sockname)
 	if err != nil {
 		log.Fatal("dialing:", err)

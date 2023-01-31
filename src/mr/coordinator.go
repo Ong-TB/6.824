@@ -66,23 +66,6 @@ func (t *Task) GetStat() int {
 
 // Your code here -- RPC handlers for the worker to call.
 
-// var (
-// 	cPid                   string
-// 	nReduce                int
-// 	nMap                   int
-// 	taskNum                int
-// 	mapIdx                 int
-// 	reduceIdx              int
-// 	idLock, miLock, riLock sync.Mutex
-// 	mapDone                sync.WaitGroup
-// var	reduceDone             sync.WaitGroup
-// )
-
-// var (
-// 	todoQueue  chan *Task
-// 	runningSet sync.Map
-// )
-
 // an example RPC handler.
 //
 // the RPC argument and reply types are defined in rpc.go.
