@@ -75,6 +75,7 @@ type Raft struct {
 	lastCalled  time.Time
 	role        int
 	cnt         int
+	// examine the new git
 }
 
 type Entry struct {
