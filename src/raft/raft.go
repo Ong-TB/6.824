@@ -20,6 +20,7 @@ package raft
 import (
 	//	"bytes"
 	// "log"
+
 	"log"
 	"math/rand"
 	"sync"
@@ -53,7 +54,7 @@ type ApplyMsg struct {
 
 const (
 	electionTimeout = 500
-	LEARDER         = 2
+	LEADER          = 2
 	CANDIDATE       = 1
 	FOLLOWER        = 0
 )
@@ -72,20 +73,32 @@ type Raft struct {
 	currentTerm int
 	votedFor    int
 	log         []*Entry
-	lastCalled  time.Time
-	role        int
-	cnt         int
-	// examine the new git haha
+
+	lastFollow time.Time
+	state      int
+	cnt        int
+
+	commitIdx   int
+	lastApplied int
+
+	nextIdx  []int
+	matchIdx []int
 }
 
 type Entry struct {
-	Term      int
-	Operation string
+	Term int
+	Cmd  interface{}
 }
 
 type AppendArgs struct {
+	Term     int
 	LeaderId int
-	Entry    *Entry
+	Entries  []*Entry
+}
+
+type AppendReply struct {
+	Term    int
+	Success bool
 }
 
 // return currentTerm and whether this server
@@ -96,7 +109,7 @@ func (rf *Raft) GetState() (int, bool) {
 	var isleader bool
 	rf.mu.Lock()
 	// Your code here (2A).
-	term, isleader = rf.currentTerm, rf.role == LEARDER
+	term, isleader = rf.currentTerm, rf.state == LEADER
 	rf.mu.Unlock()
 	return term, isleader
 }
@@ -141,7 +154,6 @@ func (rf *Raft) readPersist(data []byte) {
 func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
 
 	// Your code here (2D).
-
 	return true
 }
 
@@ -173,14 +185,33 @@ type RequestVoteReply struct {
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
-	// log.Printf("[%d] received vote req from %v", rf.me, *args)
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	log.Printf("[%v]|%d received vote req from %v", rf.me, rf.currentTerm, *args)
+
 	reply.Term = rf.currentTerm
-	if args.Term > rf.currentTerm && rf.votedFor < 0 {
-		rf.votedFor = args.CandidateId
-		reply.VoteGranted = true
-	} else {
+	if args.Term <= rf.currentTerm {
 		reply.VoteGranted = false
+		return
 	}
+	rf.state = FOLLOWER
+	rf.currentTerm = args.Term
+	reply.VoteGranted = true
+	rf.lastFollow = time.Now()
+}
+
+func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
+	log.Printf("Cand [%d]|%d send request vote to [%d]", args.CandidateId, args.Term, server)
+
+	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if reply.Term > rf.currentTerm {
+		rf.state = FOLLOWER
+		rf.currentTerm = reply.Term
+	}
+	return ok
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -210,32 +241,48 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // capitalized all field names in structs passed over RPC, and
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
-func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	return ok
-}
 
-func (rf *Raft) AppendEntries(entry *Entry) bool {
+func (rf *Raft) AppendEntries(entries []*Entry) bool {
+	log.Printf("Leader %d |%d heartbeats", rf.me, rf.currentTerm)
 	for i := 0; i < rf.cnt; i++ {
 		if i == rf.me {
 			continue
 		}
-		args := AppendArgs{LeaderId: rf.me, Entry: entry}
-		reply := RequestVoteReply{}
-		rf.peers[i].Call("Raft.ReceiveEntries", &args, &reply)
+		go func(server int) {
+			args := AppendArgs{Term: rf.currentTerm, LeaderId: rf.me, Entries: entries}
+			reply := AppendReply{}
+			rf.peers[server].Call("Raft.ReceiveEntries", &args, &reply)
+			if reply.Term > rf.currentTerm {
+				rf.mu.Lock()
+				rf.state = FOLLOWER
+				rf.currentTerm = reply.Term
+				rf.mu.Unlock()
+			}
+		}(i)
 	}
 	return true
 }
 
-func (rf *Raft) ReceiveEntries(args *AppendArgs, reply *RequestVoteReply) {
+func (rf *Raft) ReceiveEntries(args *AppendArgs, reply *AppendReply) {
 	rf.mu.Lock()
-	rf.lastCalled = time.Now()
-	if args.Entry.Term > rf.currentTerm {
-		rf.currentTerm = args.Entry.Term
-		rf.role = FOLLOWER
+	defer rf.mu.Unlock()
 
+	reply.Term = rf.currentTerm
+	if args.Term < rf.currentTerm {
+		// invalid append
+		reply.Success = false
+		return
 	}
-	rf.mu.Unlock()
+
+	rf.lastFollow = time.Now()
+
+	rf.state = FOLLOWER
+	rf.currentTerm = args.Term
+
+	for _, e := range args.Entries {
+		rf.log = append(rf.log, e)
+		// to modify
+	}
 }
 
 // the service using Raft (e.g. a k/v server) wants to start
@@ -256,6 +303,11 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	entry := &Entry{Term: term, Cmd: command}
+	rf.log = append(rf.log, entry)
 
 	return index, term, isLeader
 }
@@ -277,15 +329,59 @@ func (rf *Raft) Kill() {
 func (rf *Raft) killed() bool {
 	z := atomic.LoadInt32(&rf.dead)
 	return z == 1
+	//
 }
 
-func (rf *Raft) heartbeat() {
-	for {
-		// log.Println("Leader sends heartbeats", rf.me)
-		rf.AppendEntries(&Entry{Term: rf.currentTerm, Operation: "No"})
-		time.Sleep(300 * time.Millisecond)
+func (rf *Raft) checkTimeout() {
+	rf.mu.Lock()
+	if time.Since(rf.lastFollow).Milliseconds() > electionTimeout {
+		rf.state = CANDIDATE
 	}
+	rf.mu.Unlock()
 
+}
+func (rf *Raft) startElection() {
+	votes, vfinished := 1, 1
+	cond := sync.NewCond(&rf.mu)
+	rf.mu.Lock()
+	rf.currentTerm++
+	rf.state = CANDIDATE
+	rf.votedFor = rf.me
+	// rf.lastCalled = time.Now()
+	rf.mu.Unlock()
+	for i := 0; i < rf.cnt; i++ {
+		if i == rf.me {
+			continue
+		}
+		go func(server int) {
+			args := RequestVoteArgs{rf.me, rf.currentTerm}
+			reply := RequestVoteReply{}
+
+			rf.sendRequestVote(server, &args, &reply)
+
+			defer rf.mu.Unlock()
+			rf.mu.Lock()
+			vfinished++
+			log.Printf("[%d] voted %v", server, reply)
+			if reply.VoteGranted {
+				votes++
+			}
+			cond.Broadcast()
+		}(i)
+	}
+	rf.mu.Lock()
+	for votes <= rf.cnt/2 && vfinished < rf.cnt {
+		cond.Wait()
+	}
+	if votes > rf.cnt/2 {
+		rf.state = LEADER
+		rf.mu.Unlock()
+		log.Println("Cand", rf.me, "becomes Leader|term", rf.currentTerm)
+	} else {
+		rf.state = FOLLOWER
+		rf.mu.Unlock()
+		log.Println("Cand", rf.me, "back to follower")
+	}
 }
 
 // The ticker go routine starts a new election if this peer hasn't received
@@ -296,54 +392,16 @@ func (rf *Raft) ticker() {
 		// Your code here to check if a leader election should
 		// be started and to randomize sleeping time using
 		// time.Sleep().
-		time.Sleep(time.Millisecond * time.Duration(rand.Intn(300)))
-		rf.mu.Lock()
 		// log.Println(rf.me, rf.role, time.Since(rf.lastCalled).Milliseconds())
-		startElection := rf.role == FOLLOWER && time.Since(rf.lastCalled).Milliseconds() > electionTimeout
-		rf.mu.Unlock()
-		if startElection {
-			// raise an election
-			votes, vfinished := 1, 1
-			cond := sync.NewCond(&rf.mu)
-			rf.mu.Lock()
-			rf.currentTerm++
-			rf.role = CANDIDATE
-			rf.mu.Unlock()
-			for i := 0; i < rf.cnt; i++ {
-				if i == rf.me {
-					continue
-				}
-				go func(server int) {
-					args := RequestVoteArgs{rf.me, rf.currentTerm}
-					reply := RequestVoteReply{}
-
-					// log.Printf("Cand [%d] send request vote to [%d]", rf.me, server)
-					rf.sendRequestVote(server, &args, &reply)
-
-					defer rf.mu.Unlock()
-					rf.mu.Lock()
-					vfinished++
-					// log.Printf("[%d] voted %v", server, reply.VoteGranted)
-					if reply.VoteGranted {
-						votes++
-					}
-					cond.Broadcast()
-				}(i)
-			}
-			rf.mu.Lock()
-			if votes <= rf.cnt/2 && vfinished < rf.cnt {
-				cond.Wait()
-			}
-			if votes > rf.cnt/2 {
-				rf.role = LEARDER
-				go rf.heartbeat()
-				log.Println("Cand", rf.me, "becomes Leader.")
-			} else {
-				rf.role = FOLLOWER
-				rf.currentTerm--
-				// log.Println("Cand", rf.me, "back to follower")
-			}
-			rf.mu.Unlock()
+		switch rf.state {
+		case FOLLOWER:
+			time.Sleep(time.Millisecond * (time.Duration(rand.Int31n(200)) + 100))
+			rf.checkTimeout()
+		case CANDIDATE:
+			rf.startElection()
+		case LEADER:
+			time.Sleep(300 * time.Millisecond)
+			rf.AppendEntries([]*Entry{})
 		}
 
 	}
@@ -366,7 +424,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	rf.cnt = len(peers)
-	rf.lastCalled = time.Now()
+	rf.lastFollow = time.Now()
 	rf.votedFor = -1
 
 	// Your initialization code here (2A, 2B, 2C).
