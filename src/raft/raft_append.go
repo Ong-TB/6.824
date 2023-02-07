@@ -1,0 +1,102 @@
+package raft
+
+import (
+	"fmt"
+)
+
+type AppendArgs struct {
+	Term         int
+	LeaderId     int
+	Entries      []*Entry
+	PrevLogIdx   int
+	PrevLogTerm  int
+	LeaderCommit int
+}
+
+type AppendReply struct {
+	Term    int
+	Success bool
+}
+
+func (rf *Raft) newAppendArgs(term int, entries []*Entry, prevLogIdx int) *AppendArgs {
+	return &AppendArgs{
+		Term:         term,
+		LeaderId:     rf.me,
+		Entries:      entries,
+		PrevLogIdx:   prevLogIdx,
+		PrevLogTerm:  rf.log[prevLogIdx].Term,
+		LeaderCommit: rf.commitIdx,
+	}
+}
+
+func (rf *Raft) AppendEntries(server int, args *AppendArgs, reply *AppendReply) bool {
+
+	ok := rf.peers[server].Call("Raft.ReceiveEntries", args, reply)
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	rf.updateTerm(reply.Term)
+	return ok
+}
+
+func (rf *Raft) ReceiveEntries(args *AppendArgs, reply *AppendReply) {
+	// rf.electionLock.Lock()
+	// defer rf.electionLock.Unlock()
+
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	reply.Term = rf.currentTerm
+	fmt.Printf("%d Receive entries: t=%d, lid=%d, %s, pli=%d,plt=%d,lcmi=%d\n", rf.me, args.Term, args.LeaderId, printLog(args.Entries), args.PrevLogIdx, args.PrevLogTerm, args.LeaderCommit)
+
+	//
+	if args.Term < rf.currentTerm {
+		reply.Success = false
+		return
+	}
+	if args.PrevLogIdx >= len(rf.log) || args.PrevLogTerm != rf.log[args.PrevLogIdx].Term {
+		reply.Success = false
+		return
+	}
+
+	// fmt.Printf("ct=%d, len(rf.log)=%d, lpt = %d\n", rf.currentTerm, len(rf.log), rf.log[args.PrevLogIdx].Term)
+	// invalid append
+	if args.Term == rf.currentTerm {
+		rf.convertToFollwer()
+	} else {
+		rf.currentTerm = args.Term
+		reply.Term = rf.currentTerm
+		rf.state = FOLLOWER
+		sendToCh(rf.skipCh)
+	}
+	reply.Success = true
+
+	// sendToCh(rf.stepDownCh)
+	// rf.convertToFollwer()
+	if args.Entries != nil {
+
+		rf.log = rf.log[:args.PrevLogIdx+1]
+		rf.log = append(rf.log, args.Entries...)
+		fmt.Printf("[%d] reply true, len log is %v\n", rf.me, printLog(rf.log))
+
+	} else {
+		// fmt.Printf("[%d]...received heartbeat from %d\n", rf.me, args.LeaderId)
+	}
+
+	if args.LeaderCommit == rf.commitIdx {
+		if rf.log[rf.commitIdx].Term != rf.currentTerm {
+			return
+		}
+	}
+	if args.LeaderCommit > rf.commitIdx {
+		rf.commitIdx = min(args.LeaderCommit, len(rf.log)-1)
+		rf.applyCommand()
+	}
+
+	// // invalid append
+	// fmt.Printf("[%d] reply FALSe, len log is %v\n", rf.me, rf.log)
+	// fmt.Printf("ct=%d, len(rf.log)=%d, lpt = , rfcmtidx = %d\n", rf.currentTerm, len(rf.log), rf.commitIdx)
+	// //
+
+	// reply.Success = false
+
+}
