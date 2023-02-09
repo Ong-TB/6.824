@@ -21,13 +21,16 @@ import (
 	//	"bytes"
 	// "log"
 
-	"fmt"
-	"log"
+	// "fmt"
+	// "log"
+	"bytes"
+	// "fmt"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	//	"6.824/labgob"
+	"6.824/labgob"
 	"6.824/labrpc"
 )
 
@@ -72,7 +75,7 @@ type Raft struct {
 	// state a Raft server must maintain.
 	currentTerm int
 	votedFor    int
-	log         []*Entry
+	log         []Entry
 
 	lastFollow time.Time
 	state      int
@@ -90,11 +93,21 @@ type Raft struct {
 	winElectCh chan bool
 	stepDownCh chan bool
 	startCh    chan bool
+
+	timer *time.Timer
+
+	hasRecovered bool
 }
 
 type Entry struct {
 	Term int
 	Cmd  interface{}
+}
+
+type Persistee struct {
+	CurrentTerm int
+	VotedFor    int
+	Log         []Entry
 }
 
 // return currentTerm and whether this server
@@ -116,33 +129,41 @@ func (rf *Raft) GetState() (int, bool) {
 func (rf *Raft) persist() {
 	// Your code here (2C).
 	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
+
+	log := copyLog(rf.log)
+	persistee := Persistee{
+		CurrentTerm: rf.currentTerm,
+		VotedFor:    rf.votedFor,
+		Log:         log,
+	}
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(persistee)
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 // restore previously persisted state.
 func (rf *Raft) readPersist(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
+		rf.hasRecovered = true
 		return
 	}
-	log.Println("haha")
 	// Your code here (2C).
 	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var persistee Persistee
+	if d.Decode(&persistee) != nil {
+		DPrintln("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFailed to decode")
+	} else {
+		rf.currentTerm = persistee.CurrentTerm
+		rf.votedFor = persistee.VotedFor
+		rf.log = copyLog(persistee.Log)
+	}
+	rf.hasRecovered = true
+
+	// fmt.Printf("%d Read ***** from pers: ct=%d, vf=%d, log=%s\n", rf.me, rf.currentTerm, rf.votedFor, printLog(rf.log))
 }
 
 // A service wants to switch to snapshot.  Only do so if Raft hasn't
@@ -212,9 +233,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.mu.Lock()
 	defer func() {
 		if isLeader {
-			entry := &Entry{Term: term, Cmd: command}
-			fmt.Println("In start, entry is ", entry, time.Now())
+			entry := Entry{Term: term, Cmd: command}
+			// DPrintln("In start, entry is ", entry, time.Now())
 			rf.log = append(rf.log, entry)
+			rf.persist()
 			sendToCh(rf.startCh)
 		}
 		rf.mu.Unlock()
@@ -259,18 +281,46 @@ func (rf *Raft) heartbeat() {
 	if rf.state != LEADER {
 		return
 	}
-	args := rf.newAppendArgs(rf.currentTerm, []*Entry{}, len(rf.log)-1)
+	// rf.mu.Lock()
+	// defer rf.mu.Unlock()
+	// var wg sync.WaitGroup
+	// wg.Add(rf.cnt / 2)
+	lastLogIdx := len(rf.log) - 1
 	for i := 0; i < rf.cnt; i++ {
 		if i == rf.me {
 			continue
 		}
 		go func(server int) {
 			reply := &AppendReply{}
-			rf.AppendEntries(server, args, reply)
+			if lastLogIdx >= rf.nextIdx[server] {
+				// if false {
+				for !reply.Success {
+					prevLogIdx := max(rf.nextIdx[server]-1, 0)
+					log := copyLog(rf.log[prevLogIdx+1:])
+					DPrintf("send to [%d]..., prevLogIdx is %d\n", server, prevLogIdx)
+					args := rf.newAppendArgs(rf.currentTerm, log, prevLogIdx)
+					reply = &AppendReply{}
+
+					ok := rf.AppendEntries(server, args, reply)
+
+					if reply.Success {
+						rf.matchIdx[server] = args.PrevLogIdx + len(args.Entries)
+						rf.updateCommitIdx()
+
+						break
+					} else if args.Term < reply.Term || !ok {
+						break
+					}
+					rf.nextIdx[server]--
+					DPrintf("Send AE to [%d] : %v, ok=%v\n", server, *args, ok)
+				}
+				rf.nextIdx[server] = lastLogIdx + 1
+			} else {
+				args := rf.newAppendArgs(rf.currentTerm, []Entry{}, len(rf.log)-1)
+				rf.AppendEntries(server, args, reply)
+			}
 		}(i)
 	}
-	fmt.Println("Heatbeat term is id", rf.me, rf.currentTerm, time.Now())
-
 }
 
 // the service or tester wants to create a Raft server. the ports
@@ -292,18 +342,20 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.cnt = len(peers)
 	rf.lastFollow = time.Now()
 	rf.votedFor = -1
+	rf.hasRecovered = false
 
 	// Your initialization code here (2A, 2B, 2C).
 	rf.applyCh = applyCh
 	rf.nextIdx = make([]int, rf.cnt)
 	rf.matchIdx = make([]int, rf.cnt)
-	rf.log = append(rf.log, &Entry{Term: 0})
+	rf.log = append(rf.log, Entry{Term: 0})
 
 	rf.skipCh = make(chan bool)
 	rf.winElectCh = make(chan bool)
 	rf.stepDownCh = make(chan bool)
 	rf.startCh = make(chan bool)
 
+	rf.timer = time.NewTimer(getRandomElectionTimeout())
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 

@@ -1,30 +1,29 @@
 package raft
 
 import (
-	"fmt"
-	"log"
-	"math/rand"
+	// "fmt"
 	"sync"
 	"time"
 )
 
 func (rf *Raft) machineLoop() {
 	for !rf.killed() {
-		time.Sleep(10 * time.Millisecond)
+		// time.Sleep(10 * time.Millisecond)
 		rf.mu.Lock()
+		rf.persist()
 		state := rf.state
 		rf.applyCommand()
-		rf.updateCommitIdx()
+		// rf.updateCommitIdx()
 		rf.mu.Unlock()
-		// log.Println("hahahe")
+		// DPrintln("hahahe")
 		switch state {
 		case FOLLOWER:
-			t := (time.Duration(rand.Int63n(6)*50 + electionTimeout))
 			select {
-			case <-time.After(t * time.Millisecond):
-				DPrintf("*********%d time is %v\n", rf.me, t)
+			// case <-time.After(t * time.Millisecond):
+			case <-rf.timer.C:
+				// DPrintf("*********%d time is %v\n", rf.me, t)
 				rf.convertToCandidate()
-			case <-rf.skipCh:
+			default:
 			}
 		case CANDIDATE:
 			select {
@@ -37,17 +36,17 @@ func (rf *Raft) machineLoop() {
 			}
 		case LEADER:
 			select {
-			case <-time.After(100 * time.Millisecond):
-
-				go rf.heartbeat()
+			case <-time.After(50 * time.Millisecond):
 				rf.mu.Lock()
+
+				rf.heartbeat()
 				rf.updateCommitIdx()
 				rf.mu.Unlock()
 
 			case <-rf.startCh:
 				rf.replicate()
 			case <-rf.stepDownCh:
-				fmt.Println(rf.me, "converto follower")
+				DPrintln(rf.me, "converto follower")
 				rf.mu.Lock()
 				rf.convertToFollwer()
 				rf.mu.Unlock()
@@ -64,16 +63,22 @@ func (rf *Raft) convertToCandidate() {
 	// DPrintf("%d c cand\n", rf.me)
 	// time.Sleep(time.Duration(rand.Int63n(200)) * time.Millisecond)
 	rf.mu.Lock()
-	rf.resetChannels()
+	defer rf.mu.Unlock()
+
 	DPrintf("%d convert to cand\n", rf.me)
+	rf.resetChannels()
+
 	rf.currentTerm++
 	rf.state = CANDIDATE
 	rf.votedFor = rf.me
-	sendToCh(rf.skipCh)
+
+	rf.timer.Stop()
+	// sendToCh(rf.skipCh)
+
+	rf.persist()
 
 	rf.raiseElection()
 
-	rf.mu.Unlock()
 }
 
 func (rf *Raft) raiseElection() {
@@ -93,10 +98,8 @@ func (rf *Raft) raiseElection() {
 			ok := rf.sendRequestVote(server, args, reply)
 			// for !ok {
 			// 	ok = rf.sendRequestVote(server, args, reply)
-			// 	time.Sleep(time.Duration(rand.Int63n(100)) * time.Millisecond)
-
 			// }
-			fmt.Println(ok, rf.me, "send to ", server)
+			DPrintln(ok, rf.me, "send to ", server)
 			// defer rf.mu.Unlock()
 			// rf.mu.Lock()
 			if ok && reply.VoteGranted {
@@ -114,13 +117,13 @@ func (rf *Raft) raiseElection() {
 	for votes <= rf.cnt/2 && denies <= rf.cnt/2 {
 		cond.Wait()
 	}
-	log.Println("6666666666666666666666666666")
+	DPrintln("6666666666666666666666666666")
 	if votes > rf.cnt/2 {
 		sendToCh(rf.winElectCh)
-		log.Println("Cand", rf.me, "becomes Leader|term", rf.currentTerm, len(rf.log))
+		DPrintln("Cand", rf.me, "becomes Leader|term", rf.currentTerm, len(rf.log))
 	} else {
 		sendToCh(rf.stepDownCh)
-		log.Println("Cand", rf.me, "back to f00ollower", rf.currentTerm)
+		DPrintln("Cand", rf.me, "back to f00ollower", rf.currentTerm)
 	}
 }
 
@@ -130,58 +133,82 @@ func (rf *Raft) convertToLeader() {
 	rf.resetChannels()
 	rf.state = LEADER
 	rf.leaderReinit()
-	go rf.heartbeat()
+	rf.timer.Stop()
+	rf.heartbeat()
 }
 
 func (rf *Raft) convertToFollwer() {
 	// rf.mu.Lock()
-	// defer rf.mu.Unlock()
+	// defer rf.persist()
+
 	rf.resetChannels()
 	rf.votedFor = -1
 	rf.state = FOLLOWER
+	rf.timer.Reset(getRandomElectionTimeout())
 	sendToCh(rf.skipCh)
 }
 
 func (rf *Raft) updateCommitIdx() {
 
-	for i := rf.commitIdx + 1; i < len(rf.log); i++ {
-		if rf.log[i].Term == rf.currentTerm {
-			matchCnt := 0
-			for j := 0; j < rf.cnt; j++ {
-				if rf.matchIdx[j] >= i {
-					matchCnt++
+	// for i := rf.commitIdx + 1; i < len(rf.log); i++ {
+	// 	if rf.log[i].Term == rf.currentTerm {
+	// 		matchCnt := 0
+	// 		for j := 0; j < rf.cnt; j++ {
+	// 			if rf.matchIdx[j] >= i {
+	// 				matchCnt++
+	// 			}
+	// 		}
+	// 		//
+	// 		if matchCnt >= rf.cnt/2 {
+	// 			rf.commitIdx = i
+	// 			rf.applyCommand()
+	// 			DPrintf("[%d] commitidx = %d, lsappliedddddddddddddddddddd.d=%d\n", rf.me, rf.commitIdx, rf.lastApplied)
+	// 		}
+	// 		// break
+	// 	}
+	// }
+
+	for n := rf.getLastIdx(); n >= rf.commitIdx; n-- {
+		count := 1
+		if rf.log[n].Term == rf.currentTerm {
+			for i := 0; i < len(rf.peers); i++ {
+				if i != rf.me && rf.matchIdx[i] >= n {
+					count++
 				}
 			}
-			//
-			if matchCnt >= rf.cnt/2 {
-				rf.commitIdx = i
-				rf.applyCommand()
-				DPrintf("[%d] commitidx = %d, lsappliedddddddddddddddddddd.d=%d\n", rf.me, rf.commitIdx, rf.lastApplied)
-			}
-			// break
+		}
+		if count > len(rf.peers)/2 {
+			rf.commitIdx = n
+			rf.applyCommand()
+			break
 		}
 	}
-
 }
 
 func (rf *Raft) applyCommand() {
 
-	for rf.commitIdx > rf.lastApplied {
-		rf.lastApplied++
-		appMsg := ApplyMsg{CommandValid: true, Command: rf.log[rf.lastApplied].Cmd, CommandIndex: rf.lastApplied}
-		DPrintf("hahahahahaha[%d] applies with comidx = %v,\n", rf.me, appMsg)
+	// for rf.commitIdx > rf.lastApplied {
+	// 	rf.lastApplied++
+	// 	appMsg := ApplyMsg{CommandValid: true, Command: rf.log[rf.lastApplied].Cmd, CommandIdx: rf.lastApplied}
+	// 	rf.applyCh <- appMsg
+	// 	DPrintf("hahahahahaha[%d] applies with comidx = %v,\n", rf.me, appMsg)
+	// }
 
-		rf.applyCh <- appMsg
+	//
+
+	for i := rf.lastApplied + 1; i <= rf.commitIdx; i++ {
+		rf.applyCh <- ApplyMsg{
+			CommandValid: true,
+			Command:      rf.log[i].Cmd,
+			CommandIndex: i,
+		}
+		rf.lastApplied = i
 	}
 
 }
 
 func sendToCh(ch chan bool) {
 	go func() {
-		// select {
-		// case ch <- true:
-		// default:
-		// }
 		ch <- true
 	}()
 
@@ -192,7 +219,9 @@ func (rf *Raft) replicate() {
 	defer rf.mu.Unlock()
 	// var wg sync.WaitGroup
 	// wg.Add(rf.cnt / 2)
+	// cond := sync.NewCond(&rf.mu)
 	lastLogIdx := len(rf.log) - 1
+	total := 0
 	for i := 0; i < rf.cnt; i++ {
 		if i == rf.me {
 			continue
@@ -201,9 +230,10 @@ func (rf *Raft) replicate() {
 			if lastLogIdx >= rf.nextIdx[server] {
 				reply := &AppendReply{}
 				for !reply.Success {
-					prevLogIdx := rf.nextIdx[server] - 1
+					prevLogIdx := max(rf.nextIdx[server]-1, 0)
+					log := copyLog(rf.log[prevLogIdx+1:])
 					// DPrintf("send to [%d]..., prevLogIdx is %d\n", server, prevLogIdx)
-					args := rf.newAppendArgs(rf.currentTerm, rf.log[prevLogIdx+1:], prevLogIdx)
+					args := rf.newAppendArgs(rf.currentTerm, log, prevLogIdx)
 					reply = &AppendReply{}
 
 					ok := rf.AppendEntries(server, args, reply)
@@ -218,16 +248,36 @@ func (rf *Raft) replicate() {
 					} else if args.Term < reply.Term || !ok {
 						break
 					}
+					// } else if reply.ConflictTerm < 0 {
+					// 	rf.nextIdx[server] = reply.ConflictIdx
+					// 	rf.matchIdx[server] = rf.nextIdx[server] - 1
+					// } else {
+					// 	newNextIdx := rf.getLastIdx()
+					// 	for ; newNextIdx >= 0; newNextIdx-- {
+					// 		if rf.log[newNextIdx].Term == reply.ConflictTerm {
+					// 			break
+					// 		}
+					// 	}
+					// 	// if not found, set nextIdx to conflictIdx
+					// 	if newNextIdx < 0 {
+					// 		rf.nextIdx[server] = reply.ConflictIdx
+					// 	} else {
+					// 		rf.nextIdx[server] = newNextIdx
+					// 	}
+					// 	rf.matchIdx[server] = rf.nextIdx[server] - 1
+					// }
 					rf.nextIdx[server]--
 					DPrintf("Send AE to [%d] : %v, ok=%v\n", server, *args, ok)
 				}
-				// update nextIdx
 				rf.nextIdx[server] = lastLogIdx + 1
-				// commit <- true
 			}
-			// rf.updateCommitIdx()
+			total++
+			// cond.Broadcast()
 		}(i)
 	}
-	// wg.Wait()
+
+	// for total != rf.cnt-1 {
+	// 	cond.Wait()
+	// }
 	// rf.updateCommitIdx()
 }

@@ -1,8 +1,6 @@
 package raft
 
 import (
-	"fmt"
-	"log"
 	"time"
 )
 
@@ -37,10 +35,15 @@ type RequestVoteReply struct {
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
+	for !rf.hasRecovered {
+		time.Sleep(10 * time.Millisecond)
+	}
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
 
-	log.Printf("[%v]|%d received vote req from %v", rf.me, rf.currentTerm, *args)
+	defer rf.mu.Unlock()
+	defer rf.persist()
+	//kkk
+	defer DPrintf("[%v]|%d received vote req from %v", rf.me, rf.currentTerm, *args)
 	reply.Term = rf.currentTerm
 	reply.VoteGranted = false
 
@@ -60,12 +63,12 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateId
 	}
-	rf.state = FOLLOWER
-	sendToCh(rf.skipCh)
+	// rf.state = FOLLOWER
+	// sendToCh(rf.skipCh)
 
 	rf.lastFollow = time.Now()
 
-	fmt.Printf("!!!!!!!!!!![%d] votes %v for cand [%d]|%d, %s\n", rf.me, reply.VoteGranted, args.CandidateId, args.Term, printLog(rf.log))
+	DPrintf("!!!!!!!!!!![%d] votes %v for cand [%d]|%d, %s\n", rf.me, reply.VoteGranted, args.CandidateId, args.Term, printLog(rf.log))
 	/////
 }
 
@@ -81,7 +84,7 @@ func (rf *Raft) alMoreUpToDate(args *RequestVoteArgs) bool {
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	log.Printf("Cand [%d]|%d send request vote to [%d]", args.CandidateId, args.Term, server)
+	DPrintf("Cand [%d]|%d send request vote to [%d]", args.CandidateId, args.Term, server)
 
 	rf.mu.Lock()
 	defer rf.mu.Unlock()

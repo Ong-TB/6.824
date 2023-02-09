@@ -1,13 +1,13 @@
 package raft
 
 import (
-	"fmt"
+	"time"
 )
 
 type AppendArgs struct {
 	Term         int
 	LeaderId     int
-	Entries      []*Entry
+	Entries      []Entry
 	PrevLogIdx   int
 	PrevLogTerm  int
 	LeaderCommit int
@@ -18,7 +18,7 @@ type AppendReply struct {
 	Success bool
 }
 
-func (rf *Raft) newAppendArgs(term int, entries []*Entry, prevLogIdx int) *AppendArgs {
+func (rf *Raft) newAppendArgs(term int, entries []Entry, prevLogIdx int) *AppendArgs {
 	return &AppendArgs{
 		Term:         term,
 		LeaderId:     rf.me,
@@ -41,14 +41,18 @@ func (rf *Raft) AppendEntries(server int, args *AppendArgs, reply *AppendReply) 
 func (rf *Raft) ReceiveEntries(args *AppendArgs, reply *AppendReply) {
 	// rf.electionLock.Lock()
 	// defer rf.electionLock.Unlock()
-
 	rf.mu.Lock()
+
+	for !rf.hasRecovered {
+		time.Sleep(10 * time.Millisecond)
+	}
+
 	defer rf.mu.Unlock()
+	defer rf.persist()
 
 	reply.Term = rf.currentTerm
-	fmt.Printf("%d Receive entries: t=%d, lid=%d, %s, pli=%d,plt=%d,lcmi=%d\n", rf.me, args.Term, args.LeaderId, printLog(args.Entries), args.PrevLogIdx, args.PrevLogTerm, args.LeaderCommit)
+	DPrintf("%d Receive entries: t=%d, lid=%d, %s, pli=%d,plt=%d,lcmi=%d\n", rf.me, args.Term, args.LeaderId, printLog(args.Entries), args.PrevLogIdx, args.PrevLogTerm, args.LeaderCommit)
 
-	//
 	if args.Term < rf.currentTerm {
 		reply.Success = false
 		return
@@ -58,28 +62,29 @@ func (rf *Raft) ReceiveEntries(args *AppendArgs, reply *AppendReply) {
 		return
 	}
 
-	// fmt.Printf("ct=%d, len(rf.log)=%d, lpt = %d\n", rf.currentTerm, len(rf.log), rf.log[args.PrevLogIdx].Term)
+	// DPrintf("ct=%d, len(rf.log)=%d, lpt = %d\n", rf.currentTerm, len(rf.log), rf.log[args.PrevLogIdx].Term)
 	// invalid append
 	if args.Term == rf.currentTerm {
 		rf.convertToFollwer()
+
 	} else {
 		rf.currentTerm = args.Term
 		reply.Term = rf.currentTerm
-		rf.state = FOLLOWER
-		sendToCh(rf.skipCh)
+		// rf.state = FOLLOWER
+		// sendToCh(rf.skipCh)
+		rf.convertToFollwer()
 	}
 	reply.Success = true
 
 	// sendToCh(rf.stepDownCh)
 	// rf.convertToFollwer()
 	if args.Entries != nil {
-
-		rf.log = rf.log[:args.PrevLogIdx+1]
+		rf.log = copyLog(rf.log[:args.PrevLogIdx+1])
 		rf.log = append(rf.log, args.Entries...)
-		fmt.Printf("[%d] reply true, len log is %v\n", rf.me, printLog(rf.log))
+		DPrintf("[%d] reply true, len log is %v\n", rf.me, printLog(rf.log))
 
 	} else {
-		// fmt.Printf("[%d]...received heartbeat from %d\n", rf.me, args.LeaderId)
+		// DPrintf("[%d]...received heartbeat from %d\n", rf.me, args.LeaderId)
 	}
 
 	if args.LeaderCommit == rf.commitIdx {
@@ -93,8 +98,8 @@ func (rf *Raft) ReceiveEntries(args *AppendArgs, reply *AppendReply) {
 	}
 
 	// // invalid append
-	// fmt.Printf("[%d] reply FALSe, len log is %v\n", rf.me, rf.log)
-	// fmt.Printf("ct=%d, len(rf.log)=%d, lpt = , rfcmtidx = %d\n", rf.currentTerm, len(rf.log), rf.commitIdx)
+	// DPrintf("[%d] reply FALSe, len log is %v\n", rf.me, rf.log)
+	// DPrintf("ct=%d, len(rf.log)=%d, lpt = , rfcmtidx = %d\n", rf.currentTerm, len(rf.log), rf.commitIdx)
 	// //
 
 	// reply.Success = false
