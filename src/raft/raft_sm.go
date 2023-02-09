@@ -55,15 +55,14 @@ func (rf *Raft) machineLoop() {
 	}
 }
 func (rf *Raft) resetChannels() {
-	rf.winElectCh = make(chan bool)
-	rf.stepDownCh = make(chan bool)
-	rf.startCh = make(chan bool)
+	// rf.winElectCh = make(chan bool)
+	// rf.stepDownCh = make(chan bool)
+	// rf.startCh = make(chan bool)
 }
 func (rf *Raft) convertToCandidate() {
 	// DPrintf("%d c cand\n", rf.me)
 	// time.Sleep(time.Duration(rand.Int63n(200)) * time.Millisecond)
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
 
 	DPrintf("%d convert to cand\n", rf.me)
 	rf.resetChannels()
@@ -77,11 +76,15 @@ func (rf *Raft) convertToCandidate() {
 
 	rf.persist()
 
+	rf.mu.Unlock()
+
 	rf.raiseElection()
 
 }
 
 func (rf *Raft) raiseElection() {
+	rf.mu.Lock()
+
 	args := rf.newRequestVoteArgs()
 	votes, denies := 1, 0
 	cond := sync.NewCond(&rf.mu)
@@ -101,19 +104,18 @@ func (rf *Raft) raiseElection() {
 			// }
 			DPrintln(ok, rf.me, "send to ", server)
 			// defer rf.mu.Unlock()
-			// rf.mu.Lock()
+			rf.mu.Lock()
 			if ok && reply.VoteGranted {
 				votes++
 			} else {
 				denies++
 			}
-
+			rf.mu.Unlock()
 			DPrintf("//[%d] voted %v for %d\n", server, reply, rf.me)
 
 			cond.Broadcast()
 		}(i)
 	}
-	// rf.mu.Lock()
 	for votes <= rf.cnt/2 && denies <= rf.cnt/2 {
 		cond.Wait()
 	}
@@ -125,6 +127,7 @@ func (rf *Raft) raiseElection() {
 		sendToCh(rf.stepDownCh)
 		DPrintln("Cand", rf.me, "back to f00ollower", rf.currentTerm)
 	}
+	rf.mu.Unlock()
 }
 
 func (rf *Raft) convertToLeader() {
@@ -146,6 +149,7 @@ func (rf *Raft) convertToFollwer() {
 	rf.state = FOLLOWER
 	rf.timer.Reset(getRandomElectionTimeout())
 	sendToCh(rf.skipCh)
+	rf.persist()
 }
 
 func (rf *Raft) updateCommitIdx() {
@@ -221,19 +225,24 @@ func (rf *Raft) replicate() {
 	// wg.Add(rf.cnt / 2)
 	// cond := sync.NewCond(&rf.mu)
 	lastLogIdx := len(rf.log) - 1
-	total := 0
+	cidx := rf.commitIdx
 	for i := 0; i < rf.cnt; i++ {
 		if i == rf.me {
 			continue
 		}
 		go func(server int) {
-			if lastLogIdx >= rf.nextIdx[server] {
+			rf.mu.Lock()
+			nextIdx := rf.nextIdx[server]
+			rf.mu.Unlock()
+			if lastLogIdx >= nextIdx {
 				reply := &AppendReply{}
 				for !reply.Success {
-					prevLogIdx := max(rf.nextIdx[server]-1, 0)
+					prevLogIdx := max(nextIdx-1, 0)
+					rf.mu.Lock()
 					log := copyLog(rf.log[prevLogIdx+1:])
 					// DPrintf("send to [%d]..., prevLogIdx is %d\n", server, prevLogIdx)
-					args := rf.newAppendArgs(rf.currentTerm, log, prevLogIdx)
+					args := rf.newAppendArgs(rf.currentTerm, log, prevLogIdx, cidx)
+					rf.mu.Unlock()
 					reply = &AppendReply{}
 
 					ok := rf.AppendEntries(server, args, reply)
@@ -243,7 +252,9 @@ func (rf *Raft) replicate() {
 					// }
 					if reply.Success {
 						// wg.Done()
+						rf.mu.Lock()
 						rf.matchIdx[server] = args.PrevLogIdx + len(args.Entries)
+						rf.mu.Unlock()
 						break
 					} else if args.Term < reply.Term || !ok {
 						break
@@ -266,12 +277,16 @@ func (rf *Raft) replicate() {
 					// 	}
 					// 	rf.matchIdx[server] = rf.nextIdx[server] - 1
 					// }
+					rf.mu.Lock()
 					rf.nextIdx[server]--
+					nextIdx = rf.nextIdx[server]
+					rf.mu.Unlock()
 					DPrintf("Send AE to [%d] : %v, ok=%v\n", server, *args, ok)
 				}
+				rf.mu.Lock()
 				rf.nextIdx[server] = lastLogIdx + 1
+				rf.mu.Unlock()
 			}
-			total++
 			// cond.Broadcast()
 		}(i)
 	}

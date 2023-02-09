@@ -18,14 +18,14 @@ type AppendReply struct {
 	Success bool
 }
 
-func (rf *Raft) newAppendArgs(term int, entries []Entry, prevLogIdx int) *AppendArgs {
+func (rf *Raft) newAppendArgs(term int, entries []Entry, prevLogIdx, cidx int) *AppendArgs {
 	return &AppendArgs{
 		Term:         term,
 		LeaderId:     rf.me,
 		Entries:      entries,
 		PrevLogIdx:   prevLogIdx,
 		PrevLogTerm:  rf.log[prevLogIdx].Term,
-		LeaderCommit: rf.commitIdx,
+		LeaderCommit: cidx,
 	}
 }
 

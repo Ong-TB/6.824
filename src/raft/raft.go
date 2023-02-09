@@ -231,21 +231,18 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	// Your code here (2B).
 	rf.mu.Lock()
-	defer func() {
-		if isLeader {
-			entry := Entry{Term: term, Cmd: command}
-			// DPrintln("In start, entry is ", entry, time.Now())
-			rf.log = append(rf.log, entry)
-			rf.persist()
-			sendToCh(rf.startCh)
-		}
-		rf.mu.Unlock()
-
-	}()
-
 	index = len(rf.log)
 	term = rf.currentTerm
 	isLeader = rf.state == LEADER
+
+	if isLeader {
+		entry := Entry{Term: term, Cmd: command}
+		// DPrintln("In start, entry is ", entry, time.Now())
+		rf.log = append(rf.log, entry)
+		rf.persist()
+		sendToCh(rf.startCh)
+	}
+	rf.mu.Unlock()
 
 	return index, term, isLeader
 }
@@ -286,37 +283,54 @@ func (rf *Raft) heartbeat() {
 	// var wg sync.WaitGroup
 	// wg.Add(rf.cnt / 2)
 	lastLogIdx := len(rf.log) - 1
+	cidx := rf.commitIdx
 	for i := 0; i < rf.cnt; i++ {
 		if i == rf.me {
 			continue
 		}
 		go func(server int) {
 			reply := &AppendReply{}
-			if lastLogIdx >= rf.nextIdx[server] {
+			rf.mu.Lock()
+			nextIdx := rf.nextIdx[server]
+			rf.mu.Unlock()
+			if lastLogIdx >= nextIdx {
 				// if false {
 				for !reply.Success {
-					prevLogIdx := max(rf.nextIdx[server]-1, 0)
+					prevLogIdx := max(nextIdx, 0)
+					rf.mu.Lock()
 					log := copyLog(rf.log[prevLogIdx+1:])
 					DPrintf("send to [%d]..., prevLogIdx is %d\n", server, prevLogIdx)
-					args := rf.newAppendArgs(rf.currentTerm, log, prevLogIdx)
+					args := rf.newAppendArgs(rf.currentTerm, log, prevLogIdx, cidx)
+					rf.mu.Unlock()
+
 					reply = &AppendReply{}
 
 					ok := rf.AppendEntries(server, args, reply)
 
 					if reply.Success {
+						rf.mu.Lock()
 						rf.matchIdx[server] = args.PrevLogIdx + len(args.Entries)
-						rf.updateCommitIdx()
+						// rf.updateCommitIdx()
+						rf.mu.Unlock()
 
 						break
 					} else if args.Term < reply.Term || !ok {
 						break
 					}
+					rf.mu.Lock()
 					rf.nextIdx[server]--
+					nextIdx = rf.nextIdx[server]
+					rf.mu.Unlock()
 					DPrintf("Send AE to [%d] : %v, ok=%v\n", server, *args, ok)
 				}
+				rf.mu.Lock()
 				rf.nextIdx[server] = lastLogIdx + 1
+				rf.mu.Unlock()
 			} else {
-				args := rf.newAppendArgs(rf.currentTerm, []Entry{}, len(rf.log)-1)
+				rf.mu.Lock()
+				args := rf.newAppendArgs(rf.currentTerm, []Entry{}, len(rf.log)-1, cidx)
+				rf.mu.Unlock()
+
 				rf.AppendEntries(server, args, reply)
 			}
 		}(i)
