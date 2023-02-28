@@ -70,3 +70,11 @@ func (rf *Raft) getLastIdx() int {
 func (rf *Raft) getLastTerm() int {
 	return rf.log[rf.getLastIdx()].Term
 }
+
+func (rf *Raft) GetLeaderId() int {
+	return rf.leaderId
+}
+
+func (rf *Raft) GetMe() int {
+	return rf.me
+}

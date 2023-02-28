@@ -97,6 +97,8 @@ type Raft struct {
 	timer *time.Timer
 
 	hasRecovered bool
+
+	leaderId int
 }
 
 type Entry struct {
@@ -227,7 +229,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := -1
 	term := -1
-	isLeader := true
+	isLeader := false
 
 	// Your code here (2B).
 	rf.mu.Lock()
@@ -268,7 +270,8 @@ func (rf *Raft) killed() bool {
 }
 
 func (rf *Raft) leaderReinit() {
-	for i, _ := range rf.matchIdx {
+	rf.leaderId = rf.me
+	for i := range rf.matchIdx {
 		rf.nextIdx[i] = len(rf.log)
 		rf.matchIdx[i] = 0
 	}
@@ -358,7 +361,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.votedFor = -1
 	rf.hasRecovered = false
 
-	// Your initialization code here (2A, 2B, 2C).
+	// Your initialization code here (2A, 2B, 2C)
+	rf.leaderId = 0
 	rf.applyCh = applyCh
 	rf.nextIdx = make([]int, rf.cnt)
 	rf.matchIdx = make([]int, rf.cnt)

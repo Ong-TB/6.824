@@ -62,6 +62,7 @@ func (rf *Raft) ReceiveEntries(args *AppendArgs, reply *AppendReply) {
 		return
 	}
 
+	rf.leaderId = args.LeaderId
 	// DPrintf("ct=%d, len(rf.log)=%d, lpt = %d\n", rf.currentTerm, len(rf.log), rf.log[args.PrevLogIdx].Term)
 	// invalid append
 	if args.Term == rf.currentTerm {
